@@ -2,6 +2,7 @@ type HzProjectConfig
 version 1
 ---
 name minecraft-opus-5-5-kg-1
+id 9b6c5c0ad0a9d5c2146598d673c883b0
 engine hz
 src_roots 1 src
 asset_roots 1 assets
