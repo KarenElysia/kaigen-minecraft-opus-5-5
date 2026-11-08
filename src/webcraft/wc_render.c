@@ -423,9 +423,10 @@ void wc_render_init(WcRenderer *r, Allocator *alloc, const WcTextureData *tex, u
   wc_create_targets(r, w, h, uw, uh);
   wc_ensure_shadow(r);
 
-  GpuTextureMipsDesc blk = {.format = GPU_TEXTURE_FORMAT_RGBA8_SRGB, .width = WC_TEX_SIZE, .height = WC_TEX_SIZE,
-                            .layer_count = T_COUNT, .mip_count = WC_TEX_MIPS, .data = tex->albedo,
-                            .data_size = tex->data_size, .label = "wc block albedo"};
+  GpuTextureMipsDesc blk = {.kind = GPU_TEXTURE_KIND_2D_ARRAY, .format = GPU_TEXTURE_FORMAT_RGBA8_SRGB,
+                            .width = WC_TEX_SIZE, .height = WC_TEX_SIZE, .depth_or_layers = T_COUNT,
+                            .mip_count = WC_TEX_MIPS, .data = tex->albedo, .data_size = tex->data_size,
+                            .label = "wc block albedo"};
   r->blk_albedo = gpu_make_texture_mips(&blk);
   blk.format = GPU_TEXTURE_FORMAT_RGBA8;
   blk.data = tex->normal;
@@ -435,12 +436,16 @@ void wc_render_init(WcRenderer *r, Allocator *alloc, const WcTextureData *tex, u
   blk.label = "wc block spec";
   r->blk_spec = gpu_make_texture_mips(&blk);
 
-  r->noise_base = gpu_make_storage_texture_3d(WC_NOISE_BASE, WC_NOISE_BASE, WC_NOISE_BASE, GPU_TEXTURE_FORMAT_RGBA8,
-                                              wc_mip_count(WC_NOISE_BASE));
-  r->noise_detail = gpu_make_storage_texture_3d(WC_NOISE_DETAIL, WC_NOISE_DETAIL, WC_NOISE_DETAIL,
-                                                GPU_TEXTURE_FORMAT_RGBA8, wc_mip_count(WC_NOISE_DETAIL));
-  r->weather = gpu_make_storage_texture_mip(WC_WEATHER_SIZE, WC_WEATHER_SIZE, GPU_TEXTURE_FORMAT_RGBA8,
-                                            wc_mip_count(WC_WEATHER_SIZE));
+  r->noise_base = gpu_make_storage_texture(&(GpuStorageTextureDesc){
+      .kind = GPU_TEXTURE_KIND_3D, .format = GPU_TEXTURE_FORMAT_RGBA8, .width = WC_NOISE_BASE, .height = WC_NOISE_BASE,
+      .depth = WC_NOISE_BASE, .mip_count = wc_mip_count(WC_NOISE_BASE), .label = "wc noise base"});
+  r->noise_detail = gpu_make_storage_texture(&(GpuStorageTextureDesc){
+      .kind = GPU_TEXTURE_KIND_3D, .format = GPU_TEXTURE_FORMAT_RGBA8, .width = WC_NOISE_DETAIL,
+      .height = WC_NOISE_DETAIL, .depth = WC_NOISE_DETAIL, .mip_count = wc_mip_count(WC_NOISE_DETAIL),
+      .label = "wc noise detail"});
+  r->weather = gpu_make_storage_texture(&(GpuStorageTextureDesc){
+      .kind = GPU_TEXTURE_KIND_2D, .format = GPU_TEXTURE_FORMAT_RGBA8, .width = WC_WEATHER_SIZE,
+      .height = WC_WEATHER_SIZE, .mip_count = wc_mip_count(WC_WEATHER_SIZE), .label = "wc weather"});
 
   r->trans_lut = wc_rt("wc transmittance", 256, 64, WC_HDR, false);
   r->ms_lut = wc_rt("wc multiscatter", 32, 32, WC_HDR, false);
@@ -945,35 +950,39 @@ typedef enum {
   WC_EFFECT_TAA = 1u << 2,
 } WcEffect;
 
+hz_internal b32 wc_pipeline_ready(GpuPipeline p) { return gpu_pipeline_state(p) == GPU_PIPELINE_READY; }
+
+hz_internal b32 wc_compute_ready(GpuComputePipeline p) { return gpu_compute_pipeline_state(p) == GPU_PIPELINE_READY; }
+
 hz_internal b32 wc_noise_pipelines_ready(WcRenderer *r) {
-  return gpu_compute_pipeline_is_ready(r->noise_base_cs) && gpu_compute_pipeline_is_ready(r->noise_detail_cs) &&
-         gpu_compute_pipeline_is_ready(r->noise_weather_cs) && gpu_compute_pipeline_is_ready(r->noise_down3d_cs) &&
-         gpu_compute_pipeline_is_ready(r->noise_down2d_cs);
+  return wc_compute_ready(r->noise_base_cs) && wc_compute_ready(r->noise_detail_cs) &&
+         wc_compute_ready(r->noise_weather_cs) && wc_compute_ready(r->noise_down3d_cs) &&
+         wc_compute_ready(r->noise_down2d_cs);
 }
 
 // effects whose pipelines are compiled; the rest render as if their setting were off
 hz_internal u32 wc_effects_ready(WcRenderer *r) {
   u32 m = 0;
-  if (gpu_pipeline_is_ready(r->ssao)) m |= WC_EFFECT_SSAO;
-  if (r->noise_baked && gpu_pipeline_is_ready(r->clouds) && gpu_pipeline_is_ready(r->clouds_temporal))
+  if (wc_pipeline_ready(r->ssao)) m |= WC_EFFECT_SSAO;
+  if (r->noise_baked && wc_pipeline_ready(r->clouds) && wc_pipeline_ready(r->clouds_temporal))
     m |= WC_EFFECT_CLOUDS;
-  if (gpu_pipeline_is_ready(r->taa)) m |= WC_EFFECT_TAA;
+  if (wc_pipeline_ready(r->taa)) m |= WC_EFFECT_TAA;
   return m;
 }
 
 b32 wc_render_ready(WcRenderer *r) {
   if (!r->core_ready)
     r->core_ready =
-        gpu_pipeline_is_ready(r->transmittance) && gpu_pipeline_is_ready(r->multiscatter) &&
-        gpu_pipeline_is_ready(r->skyview) && gpu_pipeline_is_ready(r->sky_ambient) &&
-        gpu_pipeline_is_ready(r->terrain) && gpu_pipeline_is_ready(r->shadow) &&
-        gpu_pipeline_is_ready(r->shadow_clear) && gpu_pipeline_is_ready(r->deferred) &&
-        gpu_pipeline_is_ready(r->water) && gpu_pipeline_is_ready(r->entity) &&
-        gpu_pipeline_is_ready(r->entity_hand) && gpu_pipeline_is_ready(r->shafts) &&
-        gpu_compute_pipeline_is_ready(r->cull_expand_cs) &&
-        gpu_pipeline_is_ready(r->atmospherics) &&
-        gpu_pipeline_is_ready(r->bloom_down) && gpu_pipeline_is_ready(r->bloom_up) &&
-        gpu_pipeline_is_ready(r->exposure) && gpu_pipeline_is_ready(r->final);
+        wc_pipeline_ready(r->transmittance) && wc_pipeline_ready(r->multiscatter) &&
+        wc_pipeline_ready(r->skyview) && wc_pipeline_ready(r->sky_ambient) &&
+        wc_pipeline_ready(r->terrain) && wc_pipeline_ready(r->shadow) &&
+        wc_pipeline_ready(r->shadow_clear) && wc_pipeline_ready(r->deferred) &&
+        wc_pipeline_ready(r->water) && wc_pipeline_ready(r->entity) &&
+        wc_pipeline_ready(r->entity_hand) && wc_pipeline_ready(r->shafts) &&
+        wc_compute_ready(r->cull_expand_cs) &&
+        wc_pipeline_ready(r->atmospherics) &&
+        wc_pipeline_ready(r->bloom_down) && wc_pipeline_ready(r->bloom_up) &&
+        wc_pipeline_ready(r->exposure) && wc_pipeline_ready(r->final);
   if (r->core_ready && !r->pipelines_ready)
     r->pipelines_ready = wc_noise_pipelines_ready(r) &&
                          wc_effects_ready(r) == (WC_EFFECT_SSAO | WC_EFFECT_CLOUDS | WC_EFFECT_TAA);
